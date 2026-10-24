@@ -20,6 +20,16 @@
 | btop / ethtool | 官方 feed | 全构建常驻（监控 + 网卡/IRQ 诊断）；selfcheck 断言在列 |
 | gost 2.12.0（按需） | 本仓库 Releases `gost-bin-2.12.0`（官方静态 arm64） | `enable_gost=yes` 才烘入；sha256 `eab7a864…`；含 init + uci（默认 enabled=0） |
 | 包清单 | `scripts/build.sh`（唯一权威位置） | 自检断言关键包 |
+| 网络增强对齐 | `dnsmasq-full`（替换基础版）+ `kmod-macvlan` `kmod-nf-nathelper` `kmod-nf-conntrack-netlink` | 与 imm 做对比测试时传输面不引入变量；selfcheck 断言 `dnsmasq-full` 在列且基础 `dnsmasq` 已不在 |
+
+### 对齐边界（2026-10-24 定）
+
+只对齐**影响转发/DNS/NAT 行为**的件，其余不跟：
+
+- **对不齐**：`kmod-nft-fullcone`（上游 feed 没有，imm 侧补丁）→ 全锥 NAT 只能靠 dae 或放弃，测试时记为已知变量
+- **刻意不对齐**：`kmod-mppe` + `kmod-crypto-*` 链（只有 PPTP/IPsec 用）、`autocore`/`luci-app-cpufreq`/`default-settings`/中文 i18n（面板壳层）、`block-mount`+`kmod-fs-*`+USB 存储（存储面，要挂盘刷完 `apk add`）
+- **TLS 栈不对齐**：保持上游 mbedTLS（不换 OpenSSL，省 5MB，管理面够用）
+- **网卡驱动先不换**：上游默认 `kmod-r8169`（主线认 RTL8125，2.5G 能跑），A/B 测完再决定是否上 `kmod-r8125`
 
 ## 与 imm 版的差异（都是上游 feed 里没有的东西）
 

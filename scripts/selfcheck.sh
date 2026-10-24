@@ -25,7 +25,12 @@ for p in luci-app-upnp miniupnpd-nftables luci-i18n-ttyd-zh-cn openssh-sftp-serv
          tailscale btop ethtool kmod-sched-core kmod-sched-bpf kmod-veth kmod-tun; do
   grep -q "^${p} " "$MAN" || { echo "❌ 缺包: $p"; exit 1; }
 done
-echo "✓ 关键包在列 (upnp / ttyd-zh / sftp-server / tailscale / btop / ethtool / dae deps)"
+# 网络增强对齐断言 (2026-10-24): 与 imm 对齐的传输面件必须在位; dnsmasq 必须已换成 full
+for p in dnsmasq-full kmod-macvlan kmod-nf-nathelper kmod-nf-conntrack-netlink; do
+  grep -q "^${p} " "$MAN" || { echo "❌ 缺包 (网络增强对齐): $p"; exit 1; }
+done
+if grep -q "^dnsmasq " "$MAN"; then echo "❌ 基础版 dnsmasq 仍在列 (应已被 dnsmasq-full 取代, 检查 -dnsmasq)"; exit 1; fi
+echo "✓ 关键包在列 + 网络增强对齐件齐全 (dnsmasq-full/macvlan/nathelper/conntrack-netlink)"
 if grep -q "^dae " "$MAN"; then echo "❌ 意外: manifest 里有 feed 版 dae 包 (本构建只用烘入二进制)"; exit 1; fi
 echo "✓ 无 feed 版 dae 包 (纯烘入二进制)"
 if [ "${ENABLE_XDP:-no}" = "yes" ]; then

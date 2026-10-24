@@ -18,6 +18,19 @@ PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn luci-i18n-filemanager-zh-cn"
 # upnp (本体 + 中文包 + nftables 实现)
 PACKAGES="$PACKAGES luci-app-upnp luci-i18n-upnp-zh-cn miniupnpd-nftables"
+# ---- 网络增强对齐 (2026-10-24 定) ----
+# 目的: 与 imm 版做对比测试时不引入传输面变量。只对齐"影响转发/DNS/NAT 行为"的件,
+#       不影响转发的一律不跟 (见下方说明)。
+# dnsmasq-full: imm 默认是 full (基础版没有 ipset/nftset/DNSSEC); 必须显式卸掉基础版
+PACKAGES="$PACKAGES -dnsmasq dnsmasq-full"
+# NAT/桥接/连接跟踪: imm 默认带的传输面件
+PACKAGES="$PACKAGES kmod-macvlan kmod-nf-nathelper kmod-nf-conntrack-netlink"
+# 无法对齐 (记录在案, 测试时算已知变量):
+#   kmod-nft-fullcone  — 上游 feed 里根本没有 (imm 侧补丁), 全锥 NAT 只能靠 dae 或放弃
+# 刻意不对齐 (与转发路径无关):
+#   kmod-mppe + kmod-crypto-* 链 — 只有 PPTP/IPsec 用, PPPoE 不需要
+#   autocore / luci-app-cpufreq / default-settings / 中文 i18n — 面板与壳层, 不影响转发
+#   block-mount / fdisk / kmod-fs-* / USB 存储 — 存储面, 测试无关 (要挂盘再 apk add)
 # dae 运行依赖
 # 注: 上游 25.12.6 feed 无 kmod-xdp-sockets-diag (imm 有), 那是 ss/iproute2 的
 #     AF_XDP 诊断模块, dae 运行不需要; 故此处不列, 改由 kernel CONFIG_XDP_SOCKETS 提供能力。
