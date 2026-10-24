@@ -1,0 +1,25 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# XDP: WAN(eth0) 挂 native pass 程序（开机自动；撤=删本块，卸=xdp-loader unload --all eth0）
+# 时机修复（2026-10-13 R3S 实锤）：attach 若撞上 eth0 链路收敛窗口（开机 ~19s）会致数据面半死——
+# carrier 亮但 PPPoE PADO 全程 timeout（直至下次 link 事件）。故等 WAN 就绪再稳 5s 才拉起：
+# PPPoE 场景等 pppoe-wan 拿到地址；DHCP/静态场景等 eth0 拿到地址。后台执行不阻塞启动；
+# 90s 等不到仍照挂（恒 PASS 零扰动，兜底必挂）。
+# 口名：门控 5 机型（R3S/R4S/R4SE/R4S-Enterprise/R5S）在 ImmortalWrt 下 WAN 均为 eth0
+# （target/linux/rockchip/armv8 02_network 实证）。
+if [ -x /usr/sbin/xdp-loader ] && [ -e /sys/class/net/eth0 ] && [ -f /root/xdp/xdp_pass.o ]; then
+	(
+		i=0
+		while [ "$i" -lt 45 ]; do
+			ip -4 addr show pppoe-wan 2>/dev/null | grep -q "inet " && break
+			ip -4 addr show eth0 2>/dev/null | grep -q "inet " && break
+			sleep 2; i=$((i+1))
+		done
+		sleep 5
+		/usr/sbin/xdp-loader unload --all eth0 >/dev/null 2>&1
+		/usr/sbin/xdp-loader load -m native eth0 /root/xdp/xdp_pass.o 2>&1 | logger -t xdp-boot
+	) &
+fi
+
+exit 0

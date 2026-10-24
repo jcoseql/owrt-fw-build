@@ -1,0 +1,268 @@
+name: Build OpenWrt 上游 Rockchip (官方 IB · dae 固化版)
+
+# ============================================================
+# 上游官方 ImageBuilder 固化构建 —— 底座只用 downloads.openwrt.org
+#   官方组件: openwrt/imagebuilder:rockchip-armv8-<ver> + 官方 feed
+#   烘入: dae main@e3fee8fb (本仓库 Releases, sha256 锁定) + geo + procd init
+#         + Tailscale 官方静态 v1.102.4 (pkgs.tailscale.com, sha256 锁定)
+#   门控: XDP 工具面 + /root/xdp 试装件 —— 仅 native-capable 硬件 (白名单) 自动烘入;
+#         其余硬件 (E52C/R2 等 Realtek 口) 保持纯内核网络栈, 自检断言无 XDP 残留
+#   可选: enable_docker=yes → docker/dockerd/compose + kmod-br-netfilter (依赖自动解析)
+#   可选: enable_gost=yes   → gost 2.12.0 静态 arm64 + procd init + uci (默认不装, 仅出口节点按需)
+#   首启: files/etc/uci-defaults/99-custom.sh —— 仅设管理 IP + tailscale0 绑 lan zone
+#   自检: manifest 断言 + 解包比对烘入件 sha256 + XDP/gost 门控双断言
+#   与 imm 版差异: 上游 feed 无 dae/daed 包、无 vlmcsd、无 diskman、无 kmod-xdp-sockets-diag
+#                  (这些都不影响: dae 本就用烘入二进制; 其余 imm 专属件已去掉)
+#   仅手动触发 (workflow_dispatch)
+# ============================================================
+
+run-name: 上游固化构建 · ${{ inputs.profile }} · ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "OpenWrt 版本 (= builder 镜像 tag, 上游稳定版)"
+        required: true
+        type: choice
+        default: "25.12.6"
+        options:
+          - 25.12.6
+          - 25.12.5
+          - 25.12.4
+      profile:
+        description: "设备型号 (默认 E52C)"
+        required: true
+        type: choice
+        default: "radxa_e52c"
+        options:
+          - armsom_sige7
+          - firefly_roc-rk3328-cc
+          - friendlyarm_nanopc-t4
+          - friendlyarm_nanopc-t6
+          - friendlyarm_nanopi-r2c
+          - friendlyarm_nanopi-r2c-plus
+          - friendlyarm_nanopi-r2s
+          - friendlyarm_nanopi-r3s
+          - friendlyarm_nanopi-r4s
+          - friendlyarm_nanopi-r4s-enterprise
+          - friendlyarm_nanopi-r5c
+          - friendlyarm_nanopi-r5s
+          - friendlyarm_nanopi-r6c
+          - friendlyarm_nanopi-r6s
+          - friendlyarm_nanopi-r76s
+          - hinlink_h28k
+          - linkease_easepi-r1
+          - lunzn_fastrhino-r66s
+          - pine64_rock64
+          - pine64_rockpro64
+          - radxa_cm3-io
+          - radxa_e20c
+          - radxa_e25
+          - radxa_e52c
+          - radxa_rock-2a
+          - radxa_rock-2f
+          - radxa_rock-3a
+          - radxa_rock-3b
+          - radxa_rock-3c
+          - radxa_rock-4c-plus
+          - radxa_rock-4d
+          - radxa_rock-4se
+          - radxa_rock-5a
+          - radxa_rock-5b
+          - radxa_rock-5b-plus
+          - radxa_rock-5c
+          - radxa_rock-5-itx
+          - radxa_rock-5t
+          - radxa_rock-pi-4a
+          - radxa_rock-pi-e
+          - radxa_rock-pi-e-v3
+          - radxa_rock-pi-s
+          - radxa_zero-3e
+          - radxa_zero-3w
+          - sinovoip_bpi-r2-pro
+          - xunlong_orangepi-r1-plus
+          - xunlong_orangepi-r1-plus-lts
+      custom_router_ip:
+        description: "管理地址 (LAN, 如 192.168.15.1)"
+        required: true
+        default: "192.168.15.1"
+      rootfs_partsize:
+        description: "软件包空间大小"
+        required: true
+        type: choice
+        default: "2G"
+        options:
+          - "1G"
+          - "2G"
+          - "3G"
+          - "4G"
+      enable_docker:
+        description: "集成 Docker"
+        required: true
+        type: choice
+        default: "no"
+        options:
+          - "no"
+          - "yes"
+      enable_gost:
+        description: "集成 gost (socks5 出口; 默认不装, 仅出口节点按需)"
+        required: true
+        type: choice
+        default: "no"
+        options:
+          - "no"
+          - "yes"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: XDP 门控 (仅 native-capable 硬件白名单)
+        run: |
+          set -euo pipefail
+          # native XDP 跟驱动不跟型号: stmmac/dwmac-rk 系 GMAC 口才有 ndo_bpf;
+          # Realtek (r8125/r8169) 与 USB 口只能 generic —— 按策略不烘 XDP 器具。
+          # 白名单扩展: 新硬件先核内核符号 stmmac_xdp_set_prog/__stmmac_xdp_run_prog/
+          # stmmac_xdp_xmit 齐全再入列 (openwrt-firmware 技能 references/xdp-native-fleet.md)。
+          case "${{ inputs.profile }}" in
+            friendlyarm_nanopi-r3s|friendlyarm_nanopi-r4s|friendlyarm_nanopi-r4s-enterprise|friendlyarm_nanopi-r5s|hinlink_h28k)
+              echo "ENABLE_XDP=yes" >> "$GITHUB_ENV"
+              echo "XDP: enabled — native-capable (${{ inputs.profile }})"
+              ;;
+            *)
+              echo "ENABLE_XDP=no" >> "$GITHUB_ENV"
+              echo "XDP: disabled — 纯内核网络栈 (非白名单硬件)"
+              ;;
+          esac
+
+      - name: Stage files/ (管理IP + dae + geo + Tailscale)
+        run: |
+          set -euo pipefail
+          mkdir -p files/etc/config files/usr/bin files/usr/sbin files/usr/local/share/dae files/etc/init.d files/etc/uci-defaults
+          echo "${{ inputs.custom_router_ip }}" > files/etc/config/custom_router_ip.txt
+          # dae main@e3fee8fb (本仓库 Releases 托管; 换版: 改 URL + sha 两行)
+          curl -fsSL -o /tmp/dae https://github.com/jcoseql/owrt-fw-build/releases/download/dae-bin-e3fee8fb/dae-linux-arm64-e3fee8fb
+          echo "cc6c18d47bb9c404fab864cadb983e188766a5187ec706ab6a7fb88257f14d59  /tmp/dae" | sha256sum -c
+          install -m 0755 /tmp/dae files/usr/bin/dae
+          # geo 数据 (Loyalsoldier latest)
+          curl -fsSL -o files/usr/local/share/dae/geoip.dat  https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat
+          curl -fsSL -o files/usr/local/share/dae/geosite.dat https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+          # Tailscale 官方静态二进制 (换版: 改 URL + 3 处 sha)
+          curl -fsSL -o /tmp/ts.tgz https://pkgs.tailscale.com/stable/tailscale_1.102.4_arm64.tgz
+          echo "9dd1e6a592a014bbaea0103167ffe299adeda4ba14e078ce9c2895364f6c4c3f  /tmp/ts.tgz" | sha256sum -c
+          tar xzf /tmp/ts.tgz -C /tmp
+          echo "93c3558f592200133b377dd9f96eac9b278b9057f7ae6b8656b15f4fa05506d0  /tmp/tailscale_1.102.4_arm64/tailscale" | sha256sum -c
+          echo "1ff5174fcbf3abbff85eacc73e6e548b0d094d913a48c1369f60811d1e92eeef  /tmp/tailscale_1.102.4_arm64/tailscaled" | sha256sum -c
+          install -m 0755 /tmp/tailscale_1.102.4_arm64/tailscale  files/usr/sbin/tailscale
+          install -m 0755 /tmp/tailscale_1.102.4_arm64/tailscaled files/usr/sbin/tailscaled
+          chmod 0755 files/etc/init.d/dae files/etc/uci-defaults/99-custom.sh
+          # gost 叠加 (按需开关)
+          if [ "${{ inputs.enable_gost }}" = "yes" ]; then
+            curl -fsSL -o /tmp/gost https://github.com/jcoseql/owrt-fw-build/releases/download/gost-bin-2.12.0/gost-linux-arm64-2.12.0
+            echo "eab7a864df3c5b68117c2e61cf40034638e76f99c862077043131e3ab71fecdf  /tmp/gost" | sha256sum -c
+            install -m 0755 /tmp/gost files/usr/bin/gost
+            install -m 0755 gost/gost.init files/etc/init.d/gost
+            install -m 0644 gost/gost.config files/etc/config/gost
+            echo "gost: staged (enabled=0 默认, 刷后注入账密再启)"
+          fi
+          # XDP 叠加 (门控)
+          if [ "${ENABLE_XDP:-no}" = "yes" ]; then
+            mkdir -p files/root/xdp
+            cp xdp/xdp_pass.c xdp/README-xdp.txt files/root/xdp/
+            cp xdp/rc.local files/etc/rc.local
+          fi
+          echo "== files/ 清单 =="
+          find files -type f | sort
+
+      - name: Compile XDP 试装件 (clang -target bpf; 仅白名单硬件)
+        run: |
+          set -euo pipefail
+          if [ "${ENABLE_XDP:-no}" != "yes" ]; then
+            echo "XDP disabled — skip compile (纯内核网络栈)"
+            exit 0
+          fi
+          if ! command -v clang >/dev/null 2>&1; then
+            sudo apt-get -qq update && sudo apt-get -qq install -y clang
+          fi
+          clang --version | head -1
+          clang -O2 -target bpf -c files/root/xdp/xdp_pass.c -o files/root/xdp/xdp_pass.o
+          ls -la files/root/xdp/
+          od -An -tx1 -N4 files/root/xdp/xdp_pass.o
+
+      - name: Build (上游官方 ImageBuilder 容器)
+        run: |
+          case "${{ inputs.rootfs_partsize }}" in
+            1G) ROOTFS_SIZE=1024 ;;
+            2G) ROOTFS_SIZE=2048 ;;
+            3G) ROOTFS_SIZE=3072 ;;
+            4G) ROOTFS_SIZE=4096 ;;
+          esac
+          docker run --rm -i \
+              --user root \
+              -v "${{ github.workspace }}/bin:/builder/bin" \
+              -v "${{ github.workspace }}/files:/builder/files" \
+              -v "${{ github.workspace }}/scripts/build.sh:/builder/build.sh" \
+              -e PROFILE="${{ inputs.profile }}" \
+              -e ROOTFS_PARTSIZE="$ROOTFS_SIZE" \
+              -e ENABLE_DOCKER="${{ inputs.enable_docker }}" \
+              -e ENABLE_XDP="$ENABLE_XDP" \
+          openwrt/imagebuilder:rockchip-armv8-${{ inputs.version }} /bin/bash /builder/build.sh
+          echo "== 产物 =="
+          ls -la bin/targets/rockchip/armv8/
+
+      - name: Self-check (manifest + 解包比对 + XDP/gost 门控)
+        env:
+          ENABLE_DOCKER: ${{ inputs.enable_docker }}
+          ENABLE_GOST: ${{ inputs.enable_gost }}
+        run: bash scripts/selfcheck.sh
+
+      - name: Create info
+        run: |
+          if [ "${ENABLE_XDP:-no}" = "yes" ]; then
+            XDP_LINE="- 🧪 **XDP**: 工具面 + /root/xdp 试装件在机 (native 口; 用法见机内 /root/xdp/README-xdp.txt)"
+          else
+            XDP_LINE="- 🧱 **XDP**: 未启用 — 纯内核网络栈 (非 native 硬件, 按策略不烘)"
+          fi
+          if [ "${{ inputs.enable_gost }}" = "yes" ]; then
+            GOST_LINE="- 🧦 **gost**: 2.12.0 静态 arm64 已烘入 (/usr/bin/gost + init + uci, 默认 enabled=0)"
+          else
+            GOST_LINE="- 🚫 **gost**: 未装"
+          fi
+          cat > "${{ github.workspace }}/router-info.md" <<EOF
+          ## 📡 路由器后台信息
+
+          - 🧬 **底座**: **OpenWrt 上游 ${{ inputs.version }}** (downloads.openwrt.org 官方 feed, 无第三方源)
+          - ✳️ **设备型号**: ${{ inputs.profile }}
+          - 🏠 **管理地址**: ${{ inputs.custom_router_ip }}
+          - 👤 **用户名**: root
+          - 🔑 **密码**: 无 (刷机后请尽快设置)
+          - 🛠️ **dae**: main@e3fee8fb (10/02 Daily) 已烘入 (/usr/bin/dae + /etc/init.d/dae + geo; 刷后放 /etc/dae/config.dae (0640) 再 start)
+          $XDP_LINE
+          - 🐳 **Docker**: ${{ inputs.enable_docker }}
+          $GOST_LINE
+          - 🧦 **Tailscale**: 官方静态 v1.102.4 (/usr/sbin)
+          - 🎨 **主题**: bootstrap (上游默认, 无 argon)
+          - 🛡️ **首启**: 仅设管理 IP + tailscale0 绑 lan zone; WAN 入站默认拒绝
+          - ⚠️ **相对 imm 版**: 无 vlmcsd / 无 diskman / 无 feed 版 dae-daed; 包管理为 apk
+          EOF
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: Autobuild
+          name: OpenWrt-Upstream-Rockchip (owrt-fw-build)
+          body_path: ${{ github.workspace }}/router-info.md
+          files: |
+            ${{ github.workspace }}/bin/targets/rockchip/armv8/*.img.gz
+            ${{ github.workspace }}/bin/targets/rockchip/armv8/sha256sums
+            ${{ github.workspace }}/bin/targets/rockchip/armv8/*.manifest
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,6 @@
+# CI 运行时生成, 不入库
+files/etc/config/custom_router_ip.txt
+# 构建产物
+bin/
+# Finder 噪音
+.DS_Store

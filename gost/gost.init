@@ -1,0 +1,63 @@
+#!/bin/sh /etc/rc.common
+# ============================================================
+# gost socks5 出口 — 按需烘入 (构建开关 enable_gost=yes)
+#
+# 设计:
+#   - 二进制由 CI 从本仓库 Releases (gost-bin-2.12.0) 拉取 + sha256 锁死, 落 /usr/bin/gost
+#   - 默认 enabled=0: 只装不启; 刷后 uci set gost.main.enabled=1 && /etc/init.d/gost start
+#   - 账密不进仓库/Release (公开可见): 刷后写 /etc/config/gost 或由 kit 注入
+#   - listen 若非 0.0.0.0 (例如绑 tailscale0 的 100.64.x) 则 boot 阶段等 TS 就绪, 上限 120s
+# ============================================================
+USE_PROCD=1
+START=96
+
+wait_tailscale() {
+    local i=0
+    while [ $i -lt 120 ]; do
+        if ip link show tailscale0 >/dev/null 2>&1 && \
+           ip addr show tailscale0 2>/dev/null | grep -q "100\.64\."; then
+            logger -t gost "tailscale0 ready after ${i}s"
+            return 0
+        fi
+        sleep 1
+        i=$((i+1))
+    done
+    return 1
+}
+
+start_service() {
+    config_load gost || return 0
+
+    config_get_bool enabled main enabled 0
+    if [ "$enabled" != "1" ]; then
+        logger -t gost "disabled (gost.main.enabled=0), skip"
+        return 0
+    fi
+
+    config_get listen main listen '0.0.0.0'
+    config_get port   main port   '1080'
+    config_get user   main user   'wynet'
+    config_get pass   main password ''
+
+    if [ -z "$pass" ]; then
+        logger -t gost "ERROR: gost.main.password 未设置, 拒绝启动 (刷后注入账密再 start)"
+        return 0
+    fi
+
+    case "$listen" in
+        0.0.0.0|'') : ;;
+        *) wait_tailscale || logger -t gost "WARN: tailscale0 未在 120s 内就绪, 仍尝试启动" ;;
+    esac
+
+    procd_open_instance
+    procd_set_param command /usr/bin/gost
+    procd_append_param command -L "socks5://${user}:${pass}@${listen}:${port}"
+    procd_set_param respawn 3600 5 5
+    procd_close_instance
+
+    logger -t gost "started: socks5://${user}:***@${listen}:${port}"
+}
+
+service_triggers() {
+    procd_add_reload_trigger gost
+}
