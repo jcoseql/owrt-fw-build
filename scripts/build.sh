@@ -14,6 +14,8 @@ if [ ! -d ./scripts ]; then
 fi
 
 PACKAGES="curl openssh-sftp-server"
+# LuCI 中文: base 是主界面 (上游默认没有, 不加则菜单全英文)
+PACKAGES="$PACKAGES luci-i18n-base-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn"
 PACKAGES="$PACKAGES luci-i18n-ttyd-zh-cn luci-i18n-filemanager-zh-cn"
 # upnp (本体 + 中文包 + nftables 实现)
